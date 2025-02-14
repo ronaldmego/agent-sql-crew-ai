@@ -1,5 +1,3 @@
-# agents/viz_agent.py
-
 from typing import Dict, Any
 import logging
 from crewai import Agent
@@ -7,11 +5,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from config.config import get_agent_model
+from src.utils.database import get_crewai_tools
 
 logger = logging.getLogger(__name__)
 
 class VizAgent(Agent):
-    def __init__(self):
+    def __init__(self, table_name: str = None):
         model_config = get_agent_model('viz')
         
         super().__init__(
@@ -21,17 +20,20 @@ class VizAgent(Agent):
             represent data in the most meaningful way. You understand how to choose 
             the right type of visualization based on the data and the question being asked.""",
             model=model_config['model'],
+            tools=get_crewai_tools(table_name),
             verbose=True
         )
 
-    def create_visualization(self, query_results: Dict, original_question: str) -> Dict[str, Any]:
+    def create_visualization(self, 
+                           query_results: Dict, 
+                           original_question: str) -> Dict[str, Any]:
         """
         Crea una visualización basada en los resultados de la consulta
         
         Args:
             query_results: Diccionario con los resultados de SQLAgent
             original_question: Pregunta original del usuario
-        
+            
         Returns:
             Dict con datos para visualización en Streamlit
         """
@@ -39,43 +41,69 @@ class VizAgent(Agent):
             # Convertir resultados a DataFrame
             df = pd.DataFrame(query_results['results'])
             
-            # Consultar al LLM sobre el mejor tipo de visualización
+            # Analizar las columnas para determinar el mejor tipo de visualización
+            numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
+            categorical_cols = df.select_dtypes(include=['object', 'category']).columns
+            
             prompt = f"""
-            Analyze these query results and the original question:
+            Analyze this data and suggest the best visualization:
             
             Question: {original_question}
-            Columns: {query_results['columns']}
-            Data Sample: {df.head().to_dict('records')}
+            Data Structure:
+            - Numeric columns: {list(numeric_cols)}
+            - Categorical columns: {list(categorical_cols)}
+            - Total records: {len(df)}
             
-            Determine:
-            1. Best visualization type (bar, line, pie, scatter)
+            Suggest:
+            1. Best visualization type (bar, line, scatter, pie, etc.)
             2. Which columns to use for x and y axes
-            3. Any necessary data transformations
+            3. Any data transformations needed
             4. Color scheme and styling suggestions
             
-            Format response as a JSON-like structure.
+            Consider the question context and data characteristics.
             """
             
             viz_plan = self.llm.generate(prompt)
             
-            # Preparar datos para visualización en Streamlit
-            # Convertimos a formato esperado por el frontend
-            viz_data = []
+            # Crear la visualización
+            plt.figure(figsize=(10, 6))
             
-            # El agente usará las columnas que el LLM sugirió como mejores para la visualización
-            for _, row in df.iterrows():
-                # Generamos el formato estándar que espera el frontend
-                viz_data.append({
-                    "Categoría": str(row[viz_plan['x_column']]),
-                    "Cantidad": float(row[viz_plan['y_column']])
-                })
-
+            # Aplicar estilo seaborn
+            sns.set_style("whitegrid")
+            
+            # Determinar el tipo de gráfico basado en el plan
+            if "bar" in viz_plan.lower():
+                chart_type = "bar"
+                if len(numeric_cols) >= 1 and len(categorical_cols) >= 1:
+                    sns.barplot(data=df, x=categorical_cols[0], y=numeric_cols[0])
+            elif "line" in viz_plan.lower():
+                chart_type = "line"
+                if len(numeric_cols) >= 2:
+                    sns.lineplot(data=df, x=numeric_cols[0], y=numeric_cols[1])
+            elif "scatter" in viz_plan.lower():
+                chart_type = "scatter"
+                if len(numeric_cols) >= 2:
+                    sns.scatterplot(data=df, x=numeric_cols[0], y=numeric_cols[1])
+            elif "pie" in viz_plan.lower():
+                chart_type = "pie"
+                if len(numeric_cols) >= 1:
+                    plt.pie(df[numeric_cols[0]], labels=df.index if len(categorical_cols) == 0 else df[categorical_cols[0]])
+            else:
+                chart_type = "bar"  # Default to bar chart
+                if len(numeric_cols) >= 1:
+                    df[numeric_cols[0]].plot(kind='bar')
+            
+            plt.title(original_question)
+            plt.tight_layout()
+            
             return {
-                'visualization_data': viz_data,
-                'visualization_type': viz_plan['chart_type'],
-                'title': viz_plan.get('title', original_question),
-                'x_label': viz_plan.get('x_label', viz_plan['x_column']),
-                'y_label': viz_plan.get('y_label', viz_plan['y_column'])
+                'visualization_type': chart_type,
+                'figure': plt.gcf(),
+                'data': df.to_dict('records'),
+                'columns_used': {
+                    'numeric': list(numeric_cols),
+                    'categorical': list(categorical_cols)
+                }
             }
 
         except Exception as e:

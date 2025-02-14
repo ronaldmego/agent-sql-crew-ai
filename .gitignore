@@ -22,6 +22,7 @@ venv/
 *.log
 logs/
 ref/
+test/
 project_to_markdown_output/
 !data/.gitkeep
 
