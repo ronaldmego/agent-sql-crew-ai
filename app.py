@@ -10,6 +10,8 @@ from agents.schema_agent import SchemaAgent
 from agents.sql_agent import SQLAgent
 from agents.viz_agent import VizAgent
 from agents.explain_agent import ExplainAgent
+import matplotlib.pyplot as plt
+import re
 
 def initialize_session_state() -> None:
     """Initialize session state variables"""
@@ -73,7 +75,31 @@ def process_analysis(question: str, selected_table: str) -> Dict[str, Any]:
         # Formatear la salida usando el handler
         formatted_output = AgentOutputHandler.format_agent_output(result)
         
+        if formatted_output:
+            # Extraer y ejecutar el código de visualización si existe
+            for step in formatted_output.get('reasoning', []):
+                content = '\n'.join(step['thoughts'])
+                viz_code_match = re.search(r'```python\s*(.*?)\s*```', content, re.DOTALL)
+                if viz_code_match:
+                    try:
+                        # Crear nueva figura
+                        plt.figure(figsize=(10, 6))
+                        
+                        # Obtener el código y agregar el import necesario
+                        viz_code = "import matplotlib.pyplot as plt\n" + viz_code_match.group(1)
+                        
+                        # Ejecutar el código de visualización
+                        exec(viz_code, globals())
+                        
+                        # Agregar la figura al output
+                        formatted_output['visualization_fig'] = plt.gcf()
+                        plt.close()
+                    except Exception as e:
+                        st.error(f"Error generating visualization: {str(e)}")
+                    break
+        
         return formatted_output
+            
     except Exception as e:
         st.error(f"Error processing analysis: {str(e)}")
         return None
@@ -133,9 +159,9 @@ def main():
                                 st.dataframe(results)
                         
                         # Mostrar visualización si existe
-                        if formatted_output.get('visualization'):
+                        if 'visualization_fig' in formatted_output:
                             st.subheader("Data Visualization")
-                            st.plotly_chart(formatted_output['visualization'])
+                            st.pyplot(formatted_output['visualization_fig'])
                         
                         # Agregar a historial
                         st.session_state['history'].append({
