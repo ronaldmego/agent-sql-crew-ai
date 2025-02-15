@@ -1,14 +1,15 @@
-from typing import Dict, Any
+# agents/explain_agent.py
+from typing import Dict
 import logging
 import pandas as pd
 from crewai import Agent
 from config.config import get_agent_model
-from src.utils.database import get_crewai_tools
 
 logger = logging.getLogger(__name__)
 
 class ExplainAgent(Agent):
-    def __init__(self, table_name: str = None):
+    def __init__(self):
+        """Initialize the Explanation Agent"""
         model_config = get_agent_model('explain')
         
         super().__init__(
@@ -18,14 +19,10 @@ class ExplainAgent(Agent):
             explaining technical findings in clear, actionable terms. You understand 
             both business context and technical details.""",
             model=model_config['model'],
-            tools=get_crewai_tools(table_name),
             verbose=True
         )
-
-    def generate_explanation(self, 
-                           question: str, 
-                           sql_results: Dict, 
-                           viz_info: Dict) -> Dict[str, str]:
+    
+    def generate_explanation(self, question: str, sql_results: Dict, viz_info: Dict) -> Dict[str, str]:
         """
         Genera una explicación clara de los resultados
         
@@ -43,7 +40,8 @@ class ExplainAgent(Agent):
             
             # Calcular estadísticas básicas si hay datos numéricos
             stats = {}
-            for column in results_df.select_dtypes(include=['int64', 'float64']).columns:
+            numeric_cols = results_df.select_dtypes(include=['int64', 'float64']).columns
+            for column in numeric_cols:
                 stats[column] = {
                     'mean': results_df[column].mean(),
                     'min': results_df[column].min(),
@@ -51,15 +49,15 @@ class ExplainAgent(Agent):
                     'std': results_df[column].std()
                 }
             
+            # Construir el prompt para el LLM
             prompt = f"""
             Analyze these results and provide insights:
-
             Original Question: {question}
             SQL Query: {sql_results.get('query', 'Query not available')}
             
             Data Summary:
-            - Total Records: {sql_results['row_count']}
-            - Columns Analyzed: {', '.join(sql_results['columns'])}
+            - Total Records: {len(results_df)}
+            - Columns Analyzed: {', '.join(results_df.columns)}
             
             Statistical Summary: {stats if stats else 'No numerical data available'}
             
@@ -77,16 +75,16 @@ class ExplainAgent(Agent):
             Keep the explanation concise but informative, focusing on actionable insights.
             """
             
+            # Generar la explicación usando el LLM
             explanation = self.llm.generate(prompt)
             
             return {
                 'explanation': explanation,
                 'question': question,
                 'statistics': stats,
-                'total_records': sql_results['row_count'],
+                'total_records': len(results_df),
                 'timestamp': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
             }
-
         except Exception as e:
             logger.error(f"Error generating explanation: {str(e)}")
             raise

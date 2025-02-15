@@ -1,11 +1,11 @@
+# agents/schema_agent.py
 from typing import Dict, Optional
 import logging
-from crewai import Agent
-from sqlalchemy import create_engine, inspect
 import pandas as pd
 import numpy as np
+from crewai import Agent
 from config.config import get_agent_model
-from src.utils.database import get_mysql_uri, get_crewai_tools, get_table_schema
+from src.utils.database import init_database, get_table_schema
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +30,9 @@ class SchemaAgent:
             # Get model configuration
             model_config = get_agent_model('schema')
             
-            # Initialize the engine
-            self._engine = create_engine(get_mysql_uri())
-            logger.info("Database engine initialized successfully")
+            # Initialize the database connection
+            self.db = init_database()
+            logger.info("Database connection initialized successfully")
             
             # Create the base agent
             self.agent = Agent(
@@ -41,14 +41,13 @@ class SchemaAgent:
                 backstory="""You are an expert in database analysis who examines tables 
                 and understands their structure, identifying patterns and relationships in the data.""",
                 model=model_config['model'],
-                tools=get_crewai_tools(table_name),
                 verbose=True
             )
             
         except Exception as e:
             logger.error(f"Error initializing SchemaAgent: {str(e)}")
             raise
-
+    
     def analyze_table(self, table_name: str) -> Dict:
         """
         Analiza la estructura y contenido de una tabla
@@ -61,12 +60,12 @@ class SchemaAgent:
         """
         try:
             # Obtener información del esquema
-            schema_info = get_table_schema(self._engine, table_name)
+            schema_info = get_table_schema(self.db._engine, table_name)
             
             # Obtener una muestra pequeña de datos con tipos correctos
             try:
                 query = f"SELECT * FROM {table_name} LIMIT 5"
-                sample_df = pd.read_sql(query, self._engine)
+                sample_df = pd.read_sql(query, self.db._engine)
                 
                 # Convertir tipos de datos
                 for col in schema_info['columns']:
@@ -102,7 +101,7 @@ class SchemaAgent:
                     )
                 
                 columns_data.append(column_info)
-
+            
             # Generar análisis usando el LLM
             analysis_prompt = f"""
             Analyze this table structure and provide insights:
@@ -136,7 +135,7 @@ class SchemaAgent:
         except Exception as e:
             logger.error(f"Error analyzing table {table_name}: {str(e)}")
             raise
-            
+    
     def __getattr__(self, name):
         """Delegate unknown attributes to the agent"""
         return getattr(self.agent, name)

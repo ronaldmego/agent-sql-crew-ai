@@ -3,7 +3,9 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, inspect, MetaData
 from typing import List, Optional, Dict
 import logging
-from crewai_tools import MySQLSearchTool, NL2SQLTool
+from dotenv import load_dotenv
+from langchain_community.utilities import SQLDatabase
+import os
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -12,48 +14,15 @@ logger = logging.getLogger(__name__)
 # Cargar variables de entorno
 load_dotenv()
 
-def get_mysql_uri() -> str:
-    """Obtener URI de conexión MySQL desde variables de entorno"""
-    try:
-        MYSQL_USER = os.getenv('MYSQL_USER')
-        MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD')
-        MYSQL_HOST = os.getenv('MYSQL_HOST')
-        MYSQL_DATABASE = os.getenv('MYSQL_DATABASE')
-        
-        if not all([MYSQL_USER, MYSQL_PASSWORD, MYSQL_HOST, MYSQL_DATABASE]):
-            raise ValueError("Missing required database configuration in .env file")
-        
-        return f'mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}/{MYSQL_DATABASE}'
-    
-    except Exception as e:
-        logger.error(f"Error getting MySQL URI: {str(e)}")
-        raise
-
-def get_crewai_tools(table_name: Optional[str] = None) -> List:
-    """Obtener las herramientas de CrewAI configuradas para MySQL"""
-    try:
-        # Obtener el URI de conexión
-        db_uri = get_mysql_uri()
-        
-        tools = []
-        
-        # Crear NL2SQLTool con el URI completo
-        nl2sql_tool = NL2SQLTool(db_uri=db_uri)
-        tools.append(nl2sql_tool)
-        
-        # Si se especifica una tabla, agregar MySQLSearchTool
-        if table_name:
-            mysql_search = MySQLSearchTool(
-                db_uri=db_uri,
-                table_name=table_name
-            )
-            tools.append(mysql_search)
-        
-        return tools
-        
-    except Exception as e:
-        logger.error(f"Error configuring CrewAI tools: {str(e)}")
-        raise
+def init_database():
+    """Inicializar conexión a la base de datos"""
+    load_dotenv()
+    mysql_user = os.getenv('MYSQL_USER')
+    mysql_password = os.getenv('MYSQL_PASSWORD')
+    mysql_host = os.getenv('MYSQL_HOST')
+    mysql_database = os.getenv('MYSQL_DATABASE')
+    mysql_uri = f"mysql+pymysql://{mysql_user}:{mysql_password}@{mysql_host}/{mysql_database}"
+    return SQLDatabase.from_uri(mysql_uri)
 
 def get_table_names(engine) -> List[str]:
     """Obtener lista de tablas de la base de datos"""

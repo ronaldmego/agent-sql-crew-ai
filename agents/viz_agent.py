@@ -1,3 +1,4 @@
+# agents/viz_agent.py
 from typing import Dict, Any
 import logging
 from crewai import Agent
@@ -5,28 +6,27 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from config.config import get_agent_model
-from src.utils.database import get_crewai_tools
 
 logger = logging.getLogger(__name__)
 
-class VizAgent(Agent):
-    def __init__(self, table_name: str = None):
+class VizAgent:
+    """A wrapper class that combines CrewAI Agent with visualization functionality"""
+    
+    def __init__(self):
+        """Initialize the Visualization Agent"""
         model_config = get_agent_model('viz')
         
-        super().__init__(
+        self.agent = Agent(
             role='Data Visualization Expert',
             goal='Create clear and insightful visualizations from SQL query results',
             backstory="""You are an expert in data visualization who knows how to 
             represent data in the most meaningful way. You understand how to choose 
             the right type of visualization based on the data and the question being asked.""",
             model=model_config['model'],
-            tools=get_crewai_tools(table_name),
             verbose=True
         )
-
-    def create_visualization(self, 
-                           query_results: Dict, 
-                           original_question: str) -> Dict[str, Any]:
+    
+    def create_visualization(self, query_results: Dict, original_question: str) -> Dict[str, Any]:
         """
         Crea una visualización basada en los resultados de la consulta
         
@@ -38,74 +38,62 @@ class VizAgent(Agent):
             Dict con datos para visualización en Streamlit
         """
         try:
-            # Convertir resultados a DataFrame
-            df = pd.DataFrame(query_results['results'])
+            # Logging para debugging
+            logger.info(f"Query results type: {type(query_results)}")
+            logger.info(f"Query results content: {query_results}")
             
-            # Analizar las columnas para determinar el mejor tipo de visualización
-            numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
-            categorical_cols = df.select_dtypes(include=['object', 'category']).columns
+            # Obtener y procesar los resultados
+            results = query_results.get('results', [])
             
-            prompt = f"""
-            Analyze this data and suggest the best visualization:
+            # Convertir tuplas a diccionarios
+            if isinstance(results, list) and len(results) > 0:
+                # Si es una lista de tuplas, convertir a lista de diccionarios
+                if isinstance(results[0], tuple):
+                    # Asumir que la primera columna es la categoría y la segunda el valor
+                    results_list = [{'categoria': x[0], 'valor': x[1]} for x in results]
+                else:
+                    results_list = results
+            else:
+                results_list = []
+                
+            logger.info(f"Processed results: {results_list}")
             
-            Question: {original_question}
-            Data Structure:
-            - Numeric columns: {list(numeric_cols)}
-            - Categorical columns: {list(categorical_cols)}
-            - Total records: {len(df)}
+            if not results_list:
+                logger.warning("No results to visualize")
+                raise ValueError("No data available for visualization")
             
-            Suggest:
-            1. Best visualization type (bar, line, scatter, pie, etc.)
-            2. Which columns to use for x and y axes
-            3. Any data transformations needed
-            4. Color scheme and styling suggestions
+            # Convertir a DataFrame
+            df = pd.DataFrame(results_list)
+            logger.info(f"DataFrame shape: {df.shape}")
+            logger.info(f"DataFrame columns: {df.columns}")
             
-            Consider the question context and data characteristics.
-            """
-            
-            viz_plan = self.llm.generate(prompt)
+            if df.empty:
+                raise ValueError("No data available for visualization")
             
             # Crear la visualización
             plt.figure(figsize=(10, 6))
-            
-            # Aplicar estilo seaborn
             sns.set_style("whitegrid")
             
-            # Determinar el tipo de gráfico basado en el plan
-            if "bar" in viz_plan.lower():
-                chart_type = "bar"
-                if len(numeric_cols) >= 1 and len(categorical_cols) >= 1:
-                    sns.barplot(data=df, x=categorical_cols[0], y=numeric_cols[0])
-            elif "line" in viz_plan.lower():
-                chart_type = "line"
-                if len(numeric_cols) >= 2:
-                    sns.lineplot(data=df, x=numeric_cols[0], y=numeric_cols[1])
-            elif "scatter" in viz_plan.lower():
-                chart_type = "scatter"
-                if len(numeric_cols) >= 2:
-                    sns.scatterplot(data=df, x=numeric_cols[0], y=numeric_cols[1])
-            elif "pie" in viz_plan.lower():
-                chart_type = "pie"
-                if len(numeric_cols) >= 1:
-                    plt.pie(df[numeric_cols[0]], labels=df.index if len(categorical_cols) == 0 else df[categorical_cols[0]])
-            else:
-                chart_type = "bar"  # Default to bar chart
-                if len(numeric_cols) >= 1:
-                    df[numeric_cols[0]].plot(kind='bar')
-            
+            # Para este caso específico, usamos un gráfico de barras
+            sns.barplot(data=df, x='categoria', y='valor')
+            plt.xticks(rotation=45)
             plt.title(original_question)
             plt.tight_layout()
             
             return {
-                'visualization_type': chart_type,
+                'visualization_type': 'bar',
                 'figure': plt.gcf(),
                 'data': df.to_dict('records'),
                 'columns_used': {
-                    'numeric': list(numeric_cols),
-                    'categorical': list(categorical_cols)
+                    'x': 'categoria',
+                    'y': 'valor'
                 }
             }
-
+            
         except Exception as e:
             logger.error(f"Error creating visualization: {str(e)}")
             raise
+    
+    def __getattr__(self, name):
+        """Delegate unknown attributes to the agent"""
+        return getattr(self.agent, name)
