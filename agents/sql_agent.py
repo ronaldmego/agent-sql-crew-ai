@@ -33,15 +33,6 @@ class SQLAgent:
         )
     
     def generate_and_execute(self, question: str) -> Dict:
-        """
-        Genera y ejecuta una consulta SQL basada en la pregunta.
-        
-        Args:
-            question: Pregunta en lenguaje natural
-        
-        Returns:
-            Dict con la consulta y sus resultados
-        """
         try:
             # Inicializar componentes
             llm = ChatOpenAI(temperature=0, model="gpt-4o-mini")
@@ -51,29 +42,31 @@ class SQLAgent:
             # Generar la consulta
             query = write_query.invoke({"question": question})
             
-            # Limpiar la consulta - remover "SQLQuery:" si existe
-            if query.startswith("SQLQuery:"):
-                query = query.replace("SQLQuery:", "").strip()
+            # Limpiar la consulta - remover "SQLQuery:" y otros elementos no deseados
+            query = query.replace("SQLQuery:", "").replace("```sql", "").replace("```", "").strip()
             
             logger.info(f"Generated SQL Query: {query}")
             
             try:
                 # Ejecutar la consulta
                 result = execute_query.run(query)
-                
-                # Log del resultado para debugging
                 logger.info(f"SQL Result type: {type(result)}")
                 logger.info(f"SQL Result: {result}")
                 
-                # Convertir el resultado a formato lista de diccionarios si no lo es
-                if isinstance(result, str):
-                    try:
-                        import ast
-                        result = ast.literal_eval(result)
-                    except:
-                        result = [{'value': result}]
-                elif not isinstance(result, list):
-                    result = [{'value': str(result)}]
+                # Convertir tuplas a diccionarios
+                if isinstance(result, str) and result.startswith("[('"):
+                    # Evaluar el string como lista de tuplas
+                    import ast
+                    tuples_list = ast.literal_eval(result)
+                    result = [
+                        {'producto': t[0], 'total_ventas': float(t[1])} 
+                        for t in tuples_list
+                    ]
+                
+                return {
+                    'query': query,
+                    'results': result
+                }
                 
             except Exception as e:
                 logger.error(f"SQL execution error: {str(e)}")
@@ -83,10 +76,6 @@ class SQLAgent:
                     'error': str(e)
                 }
                 
-            return {
-                'query': query,
-                'results': result
-            }
         except Exception as e:
             logger.error(f"Error in SQL generation/execution: {str(e)}")
             raise

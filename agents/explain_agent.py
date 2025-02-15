@@ -1,5 +1,4 @@
-# agents/explain_agent.py
-from typing import Dict
+from typing import Dict, Any
 import logging
 import pandas as pd
 from crewai import Agent
@@ -12,7 +11,8 @@ class ExplainAgent(Agent):
         """Initialize the Explanation Agent"""
         model_config = get_agent_model('explain')
         
-        super().__init__(
+        Agent.__init__(
+            self,
             role='Data Insight Analyst',
             goal='Provide clear, insightful explanations of data analysis results',
             backstory="""You are an expert in data interpretation who excels at 
@@ -23,31 +23,15 @@ class ExplainAgent(Agent):
         )
     
     def generate_explanation(self, question: str, sql_results: Dict, viz_info: Dict) -> Dict[str, str]:
-        """
-        Genera una explicación clara de los resultados
-        
-        Args:
-            question: Pregunta original
-            sql_results: Resultados del SQLAgent
-            viz_info: Información de visualización del VizAgent
-            
-        Returns:
-            Dict con la explicación y análisis adicional
-        """
         try:
-            # Convertir resultados a DataFrame si es necesario
-            results_df = pd.DataFrame(sql_results['results'])
+            # Asegurarse de que los resultados sean un DataFrame
+            if isinstance(sql_results.get('results', []), list):
+                results_df = pd.DataFrame(sql_results['results'])
+            else:
+                results_df = pd.DataFrame([sql_results['results']])
             
-            # Calcular estadísticas básicas si hay datos numéricos
-            stats = {}
-            numeric_cols = results_df.select_dtypes(include=['int64', 'float64']).columns
-            for column in numeric_cols:
-                stats[column] = {
-                    'mean': results_df[column].mean(),
-                    'min': results_df[column].min(),
-                    'max': results_df[column].max(),
-                    'std': results_df[column].std()
-                }
+            # Convertir todos los valores numéricos a strings para el prompt
+            results_str = results_df.astype(str).to_dict('records')
             
             # Construir el prompt para el LLM
             prompt = f"""
@@ -57,9 +41,7 @@ class ExplainAgent(Agent):
             
             Data Summary:
             - Total Records: {len(results_df)}
-            - Columns Analyzed: {', '.join(results_df.columns)}
-            
-            Statistical Summary: {stats if stats else 'No numerical data available'}
+            - Results Preview: {results_str[:5]}
             
             Visualization Info:
             - Type: {viz_info.get('visualization_type', 'Not specified')}
@@ -70,21 +52,26 @@ class ExplainAgent(Agent):
             2. Key insights and patterns discovered
             3. Any notable outliers or unexpected results
             4. Potential business implications or recommendations
-            5. Data quality considerations (if any)
             
             Keep the explanation concise but informative, focusing on actionable insights.
             """
             
-            # Generar la explicación usando el LLM
-            explanation = self.llm.generate(prompt)
+            # Usar el método create directamente
+            explanation = self.create(prompt)
             
             return {
-                'explanation': explanation,
+                'explanation': str(explanation) if explanation else "No explanation available",
                 'question': question,
-                'statistics': stats,
                 'total_records': len(results_df),
                 'timestamp': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
             }
+            
         except Exception as e:
             logger.error(f"Error generating explanation: {str(e)}")
-            raise
+            # En caso de error, devolver una explicación por defecto
+            return {
+                'explanation': "Unable to generate explanation due to an error",
+                'question': question,
+                'total_records': len(results_df) if 'results_df' in locals() else 0,
+                'timestamp': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
