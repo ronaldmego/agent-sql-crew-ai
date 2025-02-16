@@ -1,43 +1,39 @@
 # agents/schema_agent.py
 from typing import Dict, Optional
 import logging
-import pandas as pd
 from crewai import Agent
 from config.config import get_agent_model
 from src.utils.database import init_database, get_table_schema
+from pydantic import PrivateAttr
 
 logger = logging.getLogger(__name__)
 
-class SchemaAgent:
+class SchemaAgent(Agent):
+    # Usar PrivateAttr para almacenar la db
+    _db = PrivateAttr()
+    
     def __init__(self):
-        try:
-            # Inicializar la base de datos
-            self.db = init_database()
-            if not self.db:
-                raise ValueError("Database initialization failed")
-            
-            # Configuración del modelo
-            model_config = get_agent_model('schema')
-            
-            # Crear el agente base
-            self.agent = Agent(
-                role='Database Schema Analyst',
-                goal='Analyze database structure and provide schema understanding',
-                backstory="""You are an expert in database analysis who examines tables 
-                and their relationships to understand patterns and suggest optimal query approaches.""",
-                model=model_config['model'],
-                verbose=True
-            )
-            
-        except Exception as e:
-            logger.error(f"Error initializing SchemaAgent: {str(e)}")
-            raise
+        # Obtener configuración del modelo
+        model_config = get_agent_model('schema')
+        
+        # Llamar al constructor de Agent primero
+        super().__init__(
+            role='Database Schema Analyst',
+            goal='Analyze database structure and provide schema understanding',
+            backstory="""You are an expert in database analysis who examines tables 
+            and their relationships to understand patterns and suggest optimal query approaches.""",
+            model=model_config['model'],
+            verbose=True
+        )
+        
+        # Inicializar la base de datos usando PrivateAttr
+        self._db = init_database()
 
     def analyze_table(self, table_name: str) -> Dict:
         """Analiza la estructura y proporciona insights sobre la tabla"""
         try:
-            # Obtener el esquema crudo primero
-            raw_schema = get_table_schema(self.db._engine, table_name)  # Esta es la estructura original
+            # Obtener el esquema usando _db
+            raw_schema = get_table_schema(self._db._engine, table_name)
             
             # Analizar columnas para determinar sus roles
             metrics = []
@@ -58,36 +54,17 @@ class SchemaAgent:
                 else:
                     dimensions.append(col_name)
 
-            # Enriquecer el análisis
-            analysis = {
+            return {
                 'table_name': table_name,
-                'raw_schema': raw_schema,  # Incluimos el esquema crudo
-                'structure': {
-                    'columns': raw_schema['columns'],
-                    'primary_keys': raw_schema.get('primary_key', []),
-                    'foreign_keys': raw_schema.get('foreign_keys', [])
-                },
+                'raw_schema': raw_schema,
                 'column_roles': {
                     'metrics': metrics,
                     'dimensions': dimensions,
                     'temporal': temporal,
                     'identifiers': identifiers
-                },
-                'suggested_queries': {
-                    'aggregations': [
-                        f"SUM({metric})" for metric in metrics
-                    ],
-                    'grouping': dimensions,
-                    'time_analysis': temporal
                 }
             }
-            
-            return analysis
             
         except Exception as e:
             logger.error(f"Error analyzing table {table_name}: {str(e)}")
             raise
-
-    def __getattr__(self, name):
-        """Delegate unknown attributes to the agent"""
-        return getattr(self.agent, name)

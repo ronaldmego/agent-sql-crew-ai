@@ -14,6 +14,12 @@ from agents.explain_agent import ExplainAgent
 from sqlalchemy import create_engine
 from src.utils.database import init_database
 
+import logging
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Crear engine como variable global
 db = init_database()
 engine = db._engine
@@ -42,61 +48,85 @@ def create_crew(question: str, selected_table: str) -> Crew:
     
     tasks = [
         Task(
-            description=f"Analyze the structure of table {selected_table}",
+            description=f"Analyze the structure of table {selected_table} and determine the best approach to answer the question: {question}",
             agent=agents['schema'],
-            expected_output="Table schema analysis"
+            expected_output="Detailed schema analysis with suggested query approach"
         ),
         Task(
-            description=f"Generate and execute SQL query for: {question}",
+            description=f"""Based on the schema analysis, generate and execute an SQL query to answer: {question}
+            Explain your reasoning for the query structure.""",
             agent=agents['sql'],
-            expected_output="SQL query results"
+            expected_output="SQL query with explanation of approach"
         ),
         Task(
-            description="Create visualization from query results",
-            agent=agents['viz'],
-            expected_output="Visualization data"
-        ),
-        Task(
-            description="Explain the analysis results",
+            description="""Analyze the query results and explain the findings in business terms.
+            Highlight key insights and patterns.""",
             agent=agents['explain'],
-            expected_output="Clear explanation of findings"
+            expected_output="Clear explanation of findings and insights"
         )
     ]
     
     return Crew(
         agents=list(agents.values()),
-        tasks=tasks
+        tasks=tasks,
+        verbose=True
     )
 
 def process_analysis(question: str, selected_table: str) -> Dict[str, Any]:
     """Process the analysis using CrewAI agents"""
     try:
-        # 1. Inicializar agentes
-        schema_agent = SchemaAgent()
-        sql_agent = SQLAgent()
+        # Crear y ejecutar el crew
+        crew = create_crew(question, selected_table)
+        crew_result = crew.kickoff()
         
-        # 2. Obtener análisis del esquema
-        schema_analysis = schema_agent.analyze_table(selected_table)
+        # Capturar el razonamiento de los agentes
+        agent_reasoning = []
+        query = None
+        formatted_results = []
         
-        # 3. Generar y ejecutar consulta SQL
-        result = sql_agent.generate_and_execute(question, schema_analysis['raw_schema'])
+        # Procesar los resultados de cada tarea
+        # La salida de crew.kickoff() es una tupla con los resultados
+        for output in crew_result:
+            # Extraer el contenido del output
+            content = str(output)
+            
+            # Determinar el tipo de agente basado en el contenido
+            agent_type = "Schema Analyst" if "structure" in content.lower() else \
+                        "SQL Expert" if "sql" in content.lower() or "query" in content.lower() else \
+                        "Data Analyst"
+            
+            # Agregar al razonamiento
+            agent_reasoning.append({
+                'agent': agent_type,
+                'thoughts': [line.strip() for line in content.split('\n') if line.strip()],
+                'task': f"Process {agent_type} analysis"
+            })
+            
+            # Si es el output del SQL Agent, extraer la consulta
+            if "SQL Expert" in agent_type:
+                # Extraer la consulta SQL del output
+                import re
+                sql_match = re.search(r"```sql\s*(.*?)\s*```", content, re.DOTALL)
+                if sql_match:
+                    query = sql_match.group(1).strip()
+                    # Ejecutar la consulta
+                    sql_agent = SQLAgent()
+                    result = sql_agent.generate_and_execute(question, {})
+                    formatted_results = result['results']
         
-        # 4. Formatear la salida
+        # Formatear la salida final
         formatted_output = {
-            'query': result['query'],
-            'results': result['results'],
-            'schema_analysis': {
-                'metrics': schema_analysis['column_roles']['metrics'],
-                'dimensions': schema_analysis['column_roles']['dimensions'],
-                'temporal': schema_analysis['column_roles']['temporal']
-            }
+            'query': query,
+            'results': formatted_results,
+            'reasoning': agent_reasoning,
+            'question': question
         }
         
         return formatted_output
     
     except Exception as e:
-        st.error(f"Error processing analysis: {str(e)}")
-        return None
+        logger.error(f"Error processing analysis: {str(e)}")
+        raise
     
 def suggest_questions(schema_analysis):
     """Generate suggested questions based on schema analysis"""
@@ -164,14 +194,29 @@ def main():
                 result = process_analysis(question, selected_table)
                 
                 if result:
+                    # Mostrar el proceso de razonamiento de los agentes
+                    st.subheader("🤖 Agent Reasoning Process")
+                    for reasoning in result['reasoning']:
+                        with st.expander(f"🔍 {reasoning['agent']}", expanded=True):
+                            st.write("**Task:**", reasoning['task'])
+                            st.write("**Thoughts:**")
+                            for thought in reasoning['thoughts']:
+                                if thought.strip() and not thought.startswith('```'):
+                                    st.markdown(f"- {thought}")
+                    
                     # Mostrar consulta SQL
                     st.subheader("Generated SQL Query")
                     st.code(result['query'], language='sql')
                     
                     # Mostrar resultados
                     st.subheader("Results")
-                    df = pd.DataFrame(result['results'])
-                    st.dataframe(df)
+                    if result['results']:
+                        try:
+                            df = pd.DataFrame(result['results'])
+                            st.dataframe(df)
+                        except Exception as e:
+                            st.error(f"Error displaying results: {str(e)}")
+                            st.write("Raw results:", result['results'])
                     
                     # Agregar a historial
                     st.session_state['history'].append({
