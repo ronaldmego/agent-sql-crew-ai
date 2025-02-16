@@ -1,15 +1,22 @@
+import pandas as pd
 import streamlit as st
 from crewai import Crew, Task
 from sqlalchemy import create_engine
-from src.utils.database import get_mysql_uri, get_table_names
+from src.utils.database import init_database, get_table_names
 from src.utils.agent_output_handler import AgentOutputHandler
 from src.components.agent_reasoning import display_agent_reasoning_component
 from typing import Dict, Any
-# Importar los agentes
 from agents.schema_agent import SchemaAgent
 from agents.sql_agent import SQLAgent
 from agents.viz_agent import VizAgent
 from agents.explain_agent import ExplainAgent
+
+from sqlalchemy import create_engine
+from src.utils.database import init_database
+
+# Crear engine como variable global
+db = init_database()
+engine = db._engine
 
 def initialize_session_state() -> None:
     """Initialize session state variables"""
@@ -62,49 +69,90 @@ def create_crew(question: str, selected_table: str) -> Crew:
     )
 
 def process_analysis(question: str, selected_table: str) -> Dict[str, Any]:
-    """Process the analysis using CrewAI and return formatted results"""
+    """Process the analysis using CrewAI agents"""
     try:
-        # Crear el crew con la pregunta y tabla específica
-        crew = create_crew(question, selected_table)
+        # 1. Inicializar agentes
+        schema_agent = SchemaAgent()
+        sql_agent = SQLAgent()
         
-        # Obtener la respuesta de CrewAI
-        result = crew.kickoff()
+        # 2. Obtener análisis del esquema
+        schema_analysis = schema_agent.analyze_table(selected_table)
         
-        # Formatear la salida usando el handler
-        formatted_output = AgentOutputHandler.format_agent_output(result)
+        # 3. Generar y ejecutar consulta SQL
+        result = sql_agent.generate_and_execute(question, schema_analysis['raw_schema'])
+        
+        # 4. Formatear la salida
+        formatted_output = {
+            'query': result['query'],
+            'results': result['results'],
+            'schema_analysis': {
+                'metrics': schema_analysis['column_roles']['metrics'],
+                'dimensions': schema_analysis['column_roles']['dimensions'],
+                'temporal': schema_analysis['column_roles']['temporal']
+            }
+        }
         
         return formatted_output
+    
     except Exception as e:
         st.error(f"Error processing analysis: {str(e)}")
         return None
+    
+def suggest_questions(schema_analysis):
+    """Generate suggested questions based on schema analysis"""
+    suggestions = []
+    
+    # Sugerencias básicas
+    if schema_analysis['column_roles']['metrics']:
+        metric = schema_analysis['column_roles']['metrics'][0]
+        dimension = schema_analysis['column_roles']['dimensions'][0]
+        suggestions.append(f"What is the total {metric} by {dimension}?")
+    
+    # Sugerencias temporales
+    if schema_analysis['column_roles']['temporal']:
+        suggestions.append("How have sales changed over time?")
+        suggestions.append("What are the monthly totals?")
+    
+    return suggestions
+
+def handle_query_error(error: Exception):
+    """Handle and display errors in a user-friendly way"""
+    if "syntax error" in str(error).lower():
+        st.error("The question couldn't be converted to a valid SQL query. Try rephrasing it.")
+    elif "column not found" in str(error).lower():
+        st.error("One or more columns mentioned in the question don't exist in the table.")
+    else:
+        st.error(f"An error occurred: {str(error)}")
 
 def main():
     initialize_session_state()
     
-    # Header
     st.title("📊 SQL Query Assistant with CrewAI")
     st.write("Ask questions about your data in natural language")
     
-    # Sidebar - Selección de tabla
-    with st.sidebar:
-        st.header("Configuration")
-        
-        # Obtener lista de tablas
-        engine = create_engine(get_mysql_uri())
-        tables = get_table_names(engine)
-        
-        selected_table = st.selectbox(
-            "Select a table to analyze:",
-            options=tables,
-            key='table_selector'
-        )
-        
-        if selected_table != st.session_state.get('selected_table'):
-            st.session_state['selected_table'] = selected_table
-            st.session_state['schema_info'] = None
+    # Selección de tabla
+    selected_table = st.selectbox(
+        "Select a table to analyze:",
+        options=get_table_names(engine)
+    )
     
-    # Main area
     if selected_table:
+        schema_analysis = SchemaAgent().analyze_table(selected_table)
+        suggestions = suggest_questions(schema_analysis)
+        # Mostrar información del esquema
+        with st.expander("Table Structure Analysis", expanded=False):
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.write("📊 Metrics")
+                st.write(schema_analysis['column_roles']['metrics'])
+            with col2:
+                st.write("🔍 Dimensions")
+                st.write(schema_analysis['column_roles']['dimensions'])
+            with col3:
+                st.write("📅 Time Columns")
+                st.write(schema_analysis['column_roles']['temporal'])
+        
         # Input para la pregunta
         question = st.text_input(
             "Ask a question about your data:",
@@ -113,49 +161,24 @@ def main():
         
         if question:
             with st.spinner("Processing your question..."):
-                try:
-                    # Procesar análisis
-                    formatted_output = process_analysis(question, selected_table)
+                result = process_analysis(question, selected_table)
+                
+                if result:
+                    # Mostrar consulta SQL
+                    st.subheader("Generated SQL Query")
+                    st.code(result['query'], language='sql')
                     
-                    if formatted_output:
-                        # Mostrar el proceso de razonamiento
-                        display_agent_reasoning_component(formatted_output['reasoning'])
-                        
-                        # Mostrar la consulta SQL
-                        if formatted_output['query']:
-                            st.subheader("Generated SQL Query")
-                            st.code(formatted_output['query'], language='sql')
-                            
-                            # Ejecutar la consulta y mostrar resultados
-                            if 'execute_query' in formatted_output:
-                                results = formatted_output['execute_query']
-                                st.subheader("Query Results")
-                                st.dataframe(results)
-                        
-                        # Mostrar visualización si existe
-                        if formatted_output.get('visualization'):
-                            st.subheader("Data Visualization")
-                            st.plotly_chart(formatted_output['visualization'])
-                        
-                        # Agregar a historial
-                        st.session_state['history'].append({
-                            'question': question,
-                            'output': formatted_output
-                        })
-                        
-                except Exception as e:
-                    st.error(f"An error occurred: {str(e)}")
-                    st.error("Please try again with a different question.")
-        
-        # Mostrar historial
-        if st.session_state['history']:
-            st.subheader("Question History")
-            for item in reversed(st.session_state['history']):
-                with st.expander(f"Q: {item['question']}"):
-                    if 'reasoning' in item['output']:
-                        display_agent_reasoning_component(item['output']['reasoning'])
-                    if 'query' in item['output']:
-                        st.code(item['output']['query'], language='sql')
+                    # Mostrar resultados
+                    st.subheader("Results")
+                    df = pd.DataFrame(result['results'])
+                    st.dataframe(df)
+                    
+                    # Agregar a historial
+                    st.session_state['history'].append({
+                        'question': question,
+                        'output': result,
+                        'timestamp': pd.Timestamp.now()
+                    })
 
 if __name__ == "__main__":
     main()

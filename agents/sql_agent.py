@@ -1,73 +1,111 @@
-# agents/sql_agent.py
-
 from typing import Dict
 import logging
 from crewai import Agent
-from sqlalchemy import create_engine
 import pandas as pd
-from config.config import get_mysql_uri, get_agent_model
+from config.config import get_agent_model
+from langchain.chains import create_sql_query_chain
+from langchain_community.tools import QuerySQLDatabaseTool
+from langchain_openai import ChatOpenAI
+from src.utils.database import init_database
 
 logger = logging.getLogger(__name__)
 
-class SQLAgent(Agent):
+class SQLAgent:
+    """SQL Agent for generating and executing database queries"""
+    
     def __init__(self):
-        model_config = get_agent_model('sql')
-        
-        super().__init__(
-            role='SQL Analytics Expert',
-            goal='Generate SQL queries from natural language questions',
-            backstory="""You are an expert SQL analyst who translates questions into 
-            efficient SQL queries. You understand data types and analytics best practices.""",
-            model=model_config['model'],
-            verbose=True
-        )
-        
-        # Inicializar el engine como atributo protegido
-        self._engine = create_engine(get_mysql_uri())
-
-    @property
-    def engine(self):
-        """Property para acceder al engine de manera segura"""
-        return self._engine
-
-    def generate_and_execute(self, question: str, schema_info: Dict) -> Dict:
-        """
-        Genera y ejecuta una consulta SQL basada en la pregunta y el esquema
-        
-        Args:
-            question: Pregunta en lenguaje natural
-            schema_info: Información del esquema proporcionada por SchemaAgent
-            
-        Returns:
-            Dict con la consulta y sus resultados
-        """
+        """Initialize the SQL Agent"""
         try:
-            # Formar el prompt para el LLM incluyendo el contexto del esquema
-            prompt = f"""
-            Based on this database schema:
-            {schema_info}
+            # Inicializar la base de datos
+            self.db = init_database()
+            if not self.db:
+                raise ValueError("Database initialization failed")
+                
+            # Configuración del modelo
+            model_config = get_agent_model('sql')
             
-            Generate a SQL query to answer: {question}
+            # Crear el agente base
+            self.agent = Agent(
+                role='SQL Analytics Expert',
+                goal='Generate and execute SQL queries from natural language questions',
+                backstory="""You are an expert SQL analyst who translates questions into 
+                efficient SQL queries. You understand data types and analytics best practices.""",
+                model=model_config['model'],
+                verbose=True
+            )
             
-            Consider:
-            - Use appropriate aggregations when needed
-            - Include relevant columns for visualization
-            - Return only the SQL query, no explanations
-            """
+        except Exception as e:
+            logger.error(f"Error initializing SQLAgent: {str(e)}")
+            raise
+    
+    def generate_and_execute(self, question: str, schema_info: Dict) -> Dict:
+        try:
+            # Inicializar componentes
+            llm = ChatOpenAI(temperature=0, model="gpt-4o-mini")
             
-            # Generar la consulta usando el LLM
-            query = self.llm.generate(prompt).strip()
+            # Generar la consulta
+            write_query = create_sql_query_chain(llm, self.db)
+            query = write_query.invoke({"question": question})
+            query = query.replace("SQLQuery:", "").replace("```sql", "").replace("```", "").strip()
             
-            # Ejecutar la consulta usando el property engine
-            results = pd.read_sql(query, self.engine)
+            logger.info(f"Generated SQL Query: {query}")
+            
+            # Ejecutar la consulta
+            execute_query = QuerySQLDatabaseTool(db=self.db)
+            result = execute_query.run(query)
+            
+            # Procesar los resultados
+            if isinstance(result, str):
+                # Si el resultado es un string, intentar convertirlo
+                if result.startswith("[('") and result.endswith("')]"):
+                    try:
+                        # Extraer nombres de columnas de la consulta
+                        import re
+                        select_match = re.search(r"SELECT\s+(.*?)\s+FROM", query, re.IGNORECASE | re.DOTALL)
+                        if select_match:
+                            columns_part = select_match.group(1)
+                            # Extraer nombres/alias de columnas
+                            column_names = []
+                            for col in re.findall(r'(?:`[\w\s]+`|[\w\s]+(?=\s*,|\s*FROM|$))', columns_part):
+                                # Buscar alias
+                                alias_match = re.search(r'AS\s+`?(\w+)`?', col, re.IGNORECASE)
+                                if alias_match:
+                                    column_names.append(alias_match.group(1))
+                                else:
+                                    # Limpiar nombre de columna
+                                    clean_col = col.strip('` ').split('.')[-1]
+                                    column_names.append(clean_col)
+                        else:
+                            # Si no podemos extraer nombres, usar genéricos
+                            column_names = ['column_1', 'column_2', 'column_3']
+
+                        # Convertir string a lista de tuplas
+                        import ast
+                        data = ast.literal_eval(result)
+                        # Convertir tuplas a diccionarios
+                        processed_results = []
+                        for row in data:
+                            row_dict = {}
+                            for i, value in enumerate(row):
+                                if i < len(column_names):
+                                    row_dict[column_names[i]] = value
+                            processed_results.append(row_dict)
+                        
+                        result = processed_results
+
+                    except Exception as e:
+                        logger.error(f"Error processing results: {str(e)}")
+                        raise
             
             return {
                 'query': query,
-                'results': results.to_dict('records'),
-                'columns': list(results.columns),
-                'row_count': len(results)
+                'results': result
             }
 
         except Exception as e:
             logger.error(f"Error in SQL generation/execution: {str(e)}")
             raise
+    
+    def __getattr__(self, name):
+        """Delegate unknown attributes to the agent"""
+        return getattr(self.agent, name)

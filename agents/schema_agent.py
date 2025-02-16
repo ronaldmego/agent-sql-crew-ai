@@ -1,95 +1,93 @@
 # agents/schema_agent.py
-
-from typing import Dict
+from typing import Dict, Optional
 import logging
-from crewai import Agent
-from sqlalchemy import create_engine, inspect
 import pandas as pd
-from config.config import get_mysql_uri, get_agent_model
+from crewai import Agent
+from config.config import get_agent_model
+from src.utils.database import init_database, get_table_schema
 
 logger = logging.getLogger(__name__)
 
-class SchemaAgent(Agent):
+class SchemaAgent:
     def __init__(self):
-        # Inicializar el engine antes del super().__init__
         try:
-            engine = create_engine(get_mysql_uri())
-            logger.info("Database engine initialized successfully")
+            # Inicializar la base de datos
+            self.db = init_database()
+            if not self.db:
+                raise ValueError("Database initialization failed")
+            
+            # Configuración del modelo
+            model_config = get_agent_model('schema')
+            
+            # Crear el agente base
+            self.agent = Agent(
+                role='Database Schema Analyst',
+                goal='Analyze database structure and provide schema understanding',
+                backstory="""You are an expert in database analysis who examines tables 
+                and their relationships to understand patterns and suggest optimal query approaches.""",
+                model=model_config['model'],
+                verbose=True
+            )
+            
         except Exception as e:
-            logger.error(f"Error initializing database engine: {str(e)}")
+            logger.error(f"Error initializing SchemaAgent: {str(e)}")
             raise
 
-        model_config = get_agent_model('schema')
-        
-        # Llamar al constructor de la clase padre
-        super().__init__(
-            role='Database Schema Analyst',
-            goal='Analyze database structure and provide clear schema understanding',
-            backstory="""You are an expert in database analysis. You examine tables 
-            and understand their structure, identifying patterns and relationships in the data.""",
-            model=model_config['model'],
-            verbose=True,
-            allow_delegation=False
-        )
-        
-        # Asignar el engine como atributo después de la inicialización
-        self._engine = engine
-
-    @property
-    def engine(self):
-        return self._engine
-
     def analyze_table(self, table_name: str) -> Dict:
-        """
-        Analiza la estructura y contenido de una tabla
-        
-        Args:
-            table_name: Nombre de la tabla a analizar
-            
-        Returns:
-            Dict con información relevante de la tabla
-        """
+        """Analiza la estructura y proporciona insights sobre la tabla"""
         try:
-            # Obtener información del esquema usando inspector
-            inspector = inspect(self.engine)
-            columns_info = inspector.get_columns(table_name)
+            # Obtener el esquema crudo primero
+            raw_schema = get_table_schema(self.db._engine, table_name)  # Esta es la estructura original
             
-            # Obtener muestra de datos
-            query = f"SELECT * FROM {table_name} LIMIT 100"
-            df = pd.read_sql(query, self.engine)
+            # Analizar columnas para determinar sus roles
+            metrics = []
+            dimensions = []
+            temporal = []
+            identifiers = []
             
-            # Preparar información de columnas en formato más amigable
-            columns_data = [{
-                'name': col['name'],
-                'type': str(col['type']),
-                'nullable': col['nullable']
-            } for col in columns_info]
-            
-            # Analizar la estructura usando el LLM
-            prompt = f"""
-            Analyze this table structure and sample data:
-            
-            Table: {table_name}
-            Columns: {columns_data}
-            Sample Data Stats: {df.describe().to_dict()}
-            
-            Provide a concise analysis of:
-            1. Column types and their purpose
-            2. Key patterns in the data
-            3. Potential relationships between columns
-            
-            Return the analysis in a structured format.
-            """
-            
-            analysis = self.llm.generate(prompt)
-            
-            return {
+            for col in raw_schema['columns']:
+                col_type = str(col['type']).upper()
+                col_name = col['name']
+                
+                if col_name in raw_schema.get('primary_key', []):
+                    identifiers.append(col_name)
+                elif 'INT' in col_type or 'FLOAT' in col_type or 'DOUBLE' in col_type or 'DECIMAL' in col_type:
+                    metrics.append(col_name)
+                elif 'DATE' in col_type or 'TIME' in col_type:
+                    temporal.append(col_name)
+                else:
+                    dimensions.append(col_name)
+
+            # Enriquecer el análisis
+            analysis = {
                 'table_name': table_name,
-                'analysis': analysis,
-                'columns': columns_data,
-                'sample_data': df.head(5).to_dict('records')
+                'raw_schema': raw_schema,  # Incluimos el esquema crudo
+                'structure': {
+                    'columns': raw_schema['columns'],
+                    'primary_keys': raw_schema.get('primary_key', []),
+                    'foreign_keys': raw_schema.get('foreign_keys', [])
+                },
+                'column_roles': {
+                    'metrics': metrics,
+                    'dimensions': dimensions,
+                    'temporal': temporal,
+                    'identifiers': identifiers
+                },
+                'suggested_queries': {
+                    'aggregations': [
+                        f"SUM({metric})" for metric in metrics
+                    ],
+                    'grouping': dimensions,
+                    'time_analysis': temporal
+                }
             }
+            
+            return analysis
             
         except Exception as e:
             logger.error(f"Error analyzing table {table_name}: {str(e)}")
             raise
+
+    def __getattr__(self, name):
+        """Delegate unknown attributes to the agent"""
+        return getattr(self.agent, name)

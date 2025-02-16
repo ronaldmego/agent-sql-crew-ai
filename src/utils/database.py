@@ -1,8 +1,9 @@
 import os
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, inspect
-from typing import List
+from sqlalchemy import create_engine, inspect, MetaData
+from typing import List, Dict
 import logging
+from langchain_community.utilities import SQLDatabase
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -11,23 +12,21 @@ logger = logging.getLogger(__name__)
 # Cargar variables de entorno
 load_dotenv()
 
-def get_mysql_uri() -> str:
-    """Obtener URI de conexión MySQL desde variables de entorno"""
+def init_database():
+    """Inicializar conexión a la base de datos"""
     try:
-        # Obtener credenciales de las variables de entorno
-        MYSQL_USER = os.getenv('MYSQL_USER')
-        MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD')
-        MYSQL_HOST = os.getenv('MYSQL_HOST')
-        MYSQL_DATABASE = os.getenv('MYSQL_DATABASE')
+        mysql_user = os.getenv('MYSQL_USER')
+        mysql_password = os.getenv('MYSQL_PASSWORD')
+        mysql_host = os.getenv('MYSQL_HOST')
+        mysql_database = os.getenv('MYSQL_DATABASE')
         
-        if not all([MYSQL_USER, MYSQL_PASSWORD, MYSQL_HOST, MYSQL_DATABASE]):
+        if not all([mysql_user, mysql_password, mysql_host, mysql_database]):
             raise ValueError("Missing required database configuration in .env file")
-        
-        # Construir URI de conexión
-        return f'mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}/{MYSQL_DATABASE}'
-    
+            
+        mysql_uri = f"mysql+pymysql://{mysql_user}:{mysql_password}@{mysql_host}/{mysql_database}"
+        return SQLDatabase.from_uri(mysql_uri)
     except Exception as e:
-        logger.error(f"Error getting MySQL URI: {str(e)}")
+        logger.error(f"Error initializing database: {str(e)}")
         raise
 
 def get_table_names(engine) -> List[str]:
@@ -40,35 +39,28 @@ def get_table_names(engine) -> List[str]:
         logger.error(f"Error getting table names: {str(e)}")
         return []
 
-def get_table_schema(engine, table_name: str) -> dict:
+def get_table_schema(engine, table_name: str) -> Dict:
     """Obtener esquema de una tabla específica"""
     try:
         inspector = inspect(engine)
+        metadata = MetaData()
+        metadata.reflect(bind=engine, only=[table_name])
+        
+        # Obtener información de columnas
+        columns = inspector.get_columns(table_name)
+        
+        # Obtener pk_constraint que incluye primary keys
+        pk_constraint = inspector.get_pk_constraint(table_name)
+        primary_keys = pk_constraint['constrained_columns'] if pk_constraint else []
+        
+        # Obtener foreign keys
+        foreign_keys = inspector.get_foreign_keys(table_name)
+        
         return {
-            'columns': inspector.get_columns(table_name),
-            'primary_key': inspector.get_primary_keys(table_name),
-            'foreign_keys': inspector.get_foreign_keys(table_name)
+            'columns': columns,
+            'primary_key': primary_keys,
+            'foreign_keys': foreign_keys
         }
     except Exception as e:
         logger.error(f"Error getting schema for table {table_name}: {str(e)}")
         return {}
-
-def execute_query(engine, query: str) -> List[tuple]:
-    """Ejecutar una consulta SQL y retornar resultados"""
-    try:
-        with engine.connect() as connection:
-            result = connection.execute(query)
-            return result.fetchall()
-    except Exception as e:
-        logger.error(f"Error executing query: {str(e)}")
-        raise
-
-def test_connection(engine) -> bool:
-    """Probar la conexión a la base de datos"""
-    try:
-        with engine.connect() as connection:
-            connection.execute("SELECT 1")
-            return True
-    except Exception as e:
-        logger.error(f"Database connection test failed: {str(e)}")
-        return False
